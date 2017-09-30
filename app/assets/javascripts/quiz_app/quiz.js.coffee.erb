@@ -1,0 +1,115 @@
+class LiveQuiz
+    constructor: () ->
+
+      @heartbeat = 40
+
+      @uuid = gon.participant.authorization_key
+      @auth_key = gon.participant.authorization_password
+      @session_key = gon.session_key
+      @participant = gon.participant
+      
+      @client_channel = @session_key+"-client"
+      @server_channel = @session_key+"-server"
+      @chat_channel = @session_key+"-chat"
+
+      @pubnub = PUBNUB(
+          publish_key: '<%= ENV.fetch('PUBNUB_PUBLISH_KEY') %>'
+          subscribe_key: '<%= ENV.fetch('PUBNUB_SUBSCRIBE_KEY') %>'
+          auth_key: @auth_key
+          uuid: @uuid
+          origin: 'pubsub.pubnub.com'
+          ssl: true
+      )
+
+      @subscribeToChatChannel()
+      @subscribeToServerChannel()
+      @whoIsHereNow()
+
+    whoIsHereNow: ->
+
+      @pubnub.here_now
+        channel: @chat_channel
+        state: true
+        callback: (message) =>
+          participants = _.map(message.uuids, (participant) -> 
+              { uuid: participant.uuid, status: 'online', name: participant.state.name, email: participant.state.email }
+          )
+          React.render(<ParticipantsList participants=participants />, @react('ParticipantsList'))  
+
+    ###################### SUBSCRIBE #########################
+
+    subscribeToChatChannel: ->
+
+      @pubnub.subscribe(
+        channel: @chat_channel
+        state:
+          name: @participant.name
+          email: @participant.email
+        message: ->
+        presence: @presenceCallback
+        connect: ->
+        heartbeat: @heartbeat
+      )
+
+    subscribeToServerChannel: ->
+        
+        @pubnub.subscribe(
+          channel: @server_channel
+          message: @serverCallback
+          connect: ->
+        )
+
+    ###################### CALLBACKS #########################
+
+    presenceCallback: (message) =>
+
+      React.render(<ActivityFeed newActivity=message />, @react('ActivityFeed'))
+      
+      status = switch message.action
+          when 'leave' then 'offline'
+          when 'timeout' then 'offline'
+          when 'join' then 'online'
+      
+      data = message.data || {}
+
+      participants = [{uuid: message.uuid, status: status, name: data.name, email: data.email }]
+      React.render(<ParticipantsList participants=participants />, @react('ParticipantsList')) 
+
+    serverCallback: (message, env, ch, timer, magic_ch) =>
+      switch(message.event)
+        when 'question' then React.render(<QuestionDisplay question=message.data.question />, @react('QuestionDisplay'))
+        when 'answered'
+          if message.data.uuid == @uuid
+            React.render(<SuccessNotifier success=message.data.correct />, @react('QuestionDisplay'))
+
+          activity = { 
+                      action: message.event,
+                      timestamp: message.data.timestamp, 
+                      uuid: message.data.uuid, 
+                      data:  
+                        name: message.data.name
+                        correct: message.data.correct
+                    }
+          React.render(<ActivityFeed newActivity=activity />, @react('ActivityFeed'))   
+
+        when 'results' then React.render(<ResultsDisplay results=message.data.results />, @react('QuestionDisplay')) 
+      
+    ##################### CLIENT COMMANDS ###################
+
+    answerQuestion: (id) ->
+      @sendEvent('answer', {answer_id: id})
+
+
+    sendEvent: (event, data) ->
+      @pubnub.publish
+        channel: @client_channel        
+        message: { event: event, auth_key: @auth_key, data: data}
+        callback : ->
+
+   ##################### UTILITIES ########################
+   
+   # Fetch a react component from the react name
+    react: (react_name) ->
+      $("[data-react-class=#{react_name}]").get(0)
+
+@liveQuiz = new LiveQuiz()   
